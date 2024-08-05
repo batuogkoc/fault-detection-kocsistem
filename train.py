@@ -71,7 +71,7 @@ def train_classifier(model,
             running_average_training_loss_logger.add_value(loss.item())
             running_average_training_accuracy_logger.add_value(int(torch.argmax(y)==torch.argmax(y_pred)))
 
-            if i % 200 == 0 and i != 0:
+            if i % 10 == 0 and i != 0:
                 fraction_done = max(i/len(train_loader), 1e-6)
                 time_taken = (time.time()-start)
                 if printing:
@@ -146,25 +146,27 @@ def hyperparameter_search(train_loader, val_loader):
 
 
 if __name__ == "__main__":
-    KUACC=True
+    KUACC=False
     RECORD=True
     if KUACC:
         print("-"*10 + "~KUACC~" + "-"*10)
         device = torch.device("cuda")
     else:
         torch.manual_seed(42)
+        print("-"*10 + "~TEST~" + "-"*10)
         device = torch.device("cpu")
+        RECORD=False
 
     print(f"Using device: {device.type}")
 
     print("Loading datasets...")
     DATASET_FOLDER_PATH = "dataset"
 
-    with open("dataset/dataset.npy", "rb") as f:
-        x_train = torch.Tensor(np.load(f))
-        y_train = torch.Tensor(np.load(f))
-        x_val = torch.Tensor(np.load(f))
-        y_val = torch.Tensor(np.load(f))
+    with open("dataset/dataset_pm.npy", "rb") as f:
+        x_train = torch.from_numpy(np.load(f, allow_pickle=True))
+        y_train = torch.from_numpy(np.load(f, allow_pickle=True))
+        x_val = torch.from_numpy(np.load(f, allow_pickle=True))
+        y_val = torch.from_numpy(np.load(f, allow_pickle=True))
         
     train_set = TensorDataset(x_train, y_train)
     val_set = TensorDataset(x_val, y_val)
@@ -173,12 +175,14 @@ if __name__ == "__main__":
 
     NUM_WORKERS = 1
     SHUFFLE = True
-    train_loader = DataLoader(train_set, batch_size=128, num_workers=NUM_WORKERS, shuffle=SHUFFLE)
-    val_loader = DataLoader(val_set, batch_size=128, num_workers=NUM_WORKERS, shuffle=SHUFFLE)
+    BATCH_SIZE=256
+    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=SHUFFLE)
+    val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=SHUFFLE)
 
     START_EPOCH = 0
     print("Setting up model, optim, etc...")
-    model = MLP([52, 100, 100, 18])
+    # model = MLP([52, 100, 100, 18])
+    model = LSTM()
     loss_fn = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
