@@ -1,2 +1,5 @@
 dataset/
 .conda/
+runs/
+runs_tensorboard/
+__pycache__/
