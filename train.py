@@ -1,3 +1,6 @@
+import os
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 import numpy as np
 
 import torch
@@ -61,21 +64,20 @@ def train_classifier(model,
             model.train()
 
             y_pred = model(x)
-
             loss = loss_fn(y_pred, y)
-
-            optimizer.zero_grad()
+            
+            # optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
             running_average_training_loss_logger.add_value(loss.item())
-            running_average_training_accuracy_logger.add_value(int(torch.argmax(y)==torch.argmax(y_pred)))
+            running_average_training_accuracy_logger.add_value(float(torch.argmax(y)==torch.argmax(y_pred)))
 
             if i % 10 == 0 and i != 0:
                 fraction_done = max(i/len(train_loader), 1e-6)
                 time_taken = (time.time()-start)
                 if printing:
-                    print(f"i: {i}| loss: {loss} | ratl: {running_average_training_loss_logger.get_avg()} | rata: {running_average_training_accuracy_logger.get_avg()}")
+                    print(f"e: {epoch} | i: {i} | loss: {loss} | ratl: {running_average_training_loss_logger.get_avg()} | rata: {running_average_training_accuracy_logger.get_avg()}")
                     print(f"{fraction_done*100}% | est time left: {time_taken*(1-fraction_done)/fraction_done} s | est total: {time_taken/fraction_done} s")
                 if logging:
                     writer.add_scalar("running_average_training_loss", running_average_training_loss_logger.get_avg(), epoch*len(train_loader) + i)
@@ -163,10 +165,19 @@ if __name__ == "__main__":
     DATASET_FOLDER_PATH = "dataset"
 
     with open("dataset/dataset_pm.npy", "rb") as f:
-        x_train = torch.from_numpy(np.load(f, allow_pickle=True))
-        y_train = torch.from_numpy(np.load(f, allow_pickle=True))
-        x_val = torch.from_numpy(np.load(f, allow_pickle=True))
-        y_val = torch.from_numpy(np.load(f, allow_pickle=True))
+        x_train_np = np.load(f, allow_pickle=True)
+        y_train_np = np.load(f, allow_pickle=True)
+        x_val_np = np.load(f, allow_pickle=True)
+        y_val_np = np.load(f, allow_pickle=True)
+        print(x_train_np.dtype)        
+        print(y_train_np.dtype)
+        print(x_val_np.dtype)
+        print(y_val_np.dtype)        
+
+        x_train = torch.from_numpy(x_train_np.astype(np.float32))
+        y_train = torch.from_numpy(y_train_np.astype(np.float32))
+        x_val = torch.from_numpy(x_val_np.astype(np.float32))
+        y_val = torch.from_numpy(y_val_np.astype(np.float32))
         
     train_set = TensorDataset(x_train, y_train)
     val_set = TensorDataset(x_val, y_val)
@@ -175,14 +186,16 @@ if __name__ == "__main__":
 
     NUM_WORKERS = 1
     SHUFFLE = True
-    BATCH_SIZE=256
+    BATCH_SIZE=16
     train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=SHUFFLE)
     val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=SHUFFLE)
 
     START_EPOCH = 0
     print("Setting up model, optim, etc...")
     # model = MLP([52, 100, 100, 18])
-    model = LSTM()
+    # model = LSTM()
+    model = TEPTransformer(input_size=train_set[0][0].shape[-1], num_classes=train_set[0][1].shape[-1],
+                           sequence_length=train_set[0][0].shape[-2], embedding_dim=128, nhead=4, num_layers=4)
     loss_fn = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
