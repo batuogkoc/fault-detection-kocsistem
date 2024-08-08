@@ -84,19 +84,33 @@ class TEPTransformer(nn.Module):
         self.input_size = input_size
         self.num_classes = num_classes
         self.pe_matrix = nn.Parameter(torch.Tensor(gen_pe(sequence_length, embedding_dim)), requires_grad=False)
-        self.cls_token = nn.Parameter(torch.Tensor(np.random.default_rng(seed=42).standard_normal((embedding_dim,))), requires_grad=False)
+        # self.pe_matrix = nn.Parameter(torch.randn(sequence_length, embedding_dim))
+        self.cls_token = nn.Parameter(torch.Tensor(np.random.default_rng(seed=42).standard_normal((embedding_dim,))), requires_grad=True)
         self.fc_encoding = nn.Linear(input_size, embedding_dim)
         self.encoder = nn.TransformerEncoder(nn.TransformerEncoderLayer(embedding_dim, nhead=nhead, dim_feedforward=embedding_dim*4, batch_first=True), num_layers=num_layers)
         self.fc_decoding = nn.Linear(embedding_dim, num_classes)
+        # self.fc_decoding = nn.Sequential(
+        #     nn.Flatten(),
+        #     nn.Linear(sequence_length*embedding_dim, 512),
+        #     nn.ReLU(),
+        #     nn.Linear(512, 256),
+        #     nn.ReLU(),
+        #     nn.Linear(256, 128),
+        #     nn.ReLU(),
+        #     nn.Linear(128, num_classes)
+        # )
         self.softmax = nn.Softmax(dim=-1)
     
     def forward(self, x):
         x = self.fc_encoding(x) + self.pe_matrix
+        # x = torch.concat((x,self.pe_matrix.broadcast_to(*x.shape[:-2], *self.pe_matrix.shape)), dim=-1)
+        # x = self.fc_encoding(x)
         shape = list(x.shape)
         shape[-2] = 1
         x = torch.concat((self.cls_token.reshape(1,1,-1).broadcast_to(shape), x), dim=-2)
         x = self.encoder(x)
         x = self.fc_decoding(x[:,0,:])
+        # print(x.shape)
         return self.softmax(x)
     
 if __name__ == "__main__":
@@ -104,6 +118,6 @@ if __name__ == "__main__":
     # torchsummary.summary(model, (32,20,52))
 
     pred = model(torch.randn([32,20,52]))
-    print(pred)
+    # print(pred)
     print(torch.sum(pred, dim=-1))
     print(pred.shape)

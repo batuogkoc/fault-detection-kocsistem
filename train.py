@@ -12,27 +12,7 @@ import os
 from torch.utils.tensorboard import SummaryWriter
 from models import *
 from datasets import *
-
-class RunningAverageLogger():
-    def __init__(self, initial_value=0):
-        self.initial_value = initial_value
-        self.reset()
-    
-    def reset(self):
-        self._count = 0
-        self._running_sum = self.initial_value
-    
-    def get_avg(self):
-        if self._count == 0:
-            return self._running_sum
-        return float(self._running_sum) / float(self._count)
-
-    def add_value(self, value):
-        self._running_sum += float(value)
-        self._count += 1
-    
-    def count(self):
-        return self._count
+from py_utils import *
 
 def train_classifier(model, 
                      optimizer, 
@@ -49,10 +29,13 @@ def train_classifier(model,
 
     test_loss_logger = RunningAverageLogger()
     test_accuracy_logger = RunningAverageLogger()
+
+    printer = InplacePrinter(2)
     
     model.to(device)
     for epoch in epoch_range:
         if printing:
+            printer.reset()
             print("-"*5 + f"EPOCH: {epoch}" + "-"*5)
         start = time.time()
 
@@ -77,8 +60,8 @@ def train_classifier(model,
                 fraction_done = max(i/len(train_loader), 1e-6)
                 time_taken = (time.time()-start)
                 if printing:
-                    print(f"e: {epoch} | i: {i} | loss: {loss} | ratl: {running_average_training_loss_logger.get_avg()} | rata: {running_average_training_accuracy_logger.get_avg()}")
-                    print(f"{fraction_done*100}% | est time left: {time_taken*(1-fraction_done)/fraction_done} s | est total: {time_taken/fraction_done} s")
+                    printer.print(f"e: {epoch} | i: {i} | loss: {loss:2.3f} | ratl: {running_average_training_loss_logger.get_avg():2.3f} | rata: {running_average_training_accuracy_logger.get_avg():.3f}")
+                    printer.print(f"{fraction_done*100:2.2f}% | est time left: {time_taken*(1-fraction_done)/fraction_done:.1f} s | est total: {time_taken/fraction_done:.1f} s")
                 if logging:
                     writer.add_scalar("running_average_training_loss", running_average_training_loss_logger.get_avg(), epoch*len(train_loader) + i)
                     writer.add_scalar("running_average_training_accuracy", running_average_training_accuracy_logger.get_avg(), epoch*len(train_loader) + i)
@@ -148,16 +131,14 @@ def hyperparameter_search(train_loader, val_loader):
 
 
 if __name__ == "__main__":
-    KUACC=False
-    RECORD=True
-    if KUACC:
-        print("-"*10 + "~KUACC~" + "-"*10)
+    RECORD=False
+    print("-"*10 + "~TRAIN~" + "-"*10)
+    print(f"RECORD: {RECORD}")
+    if torch.cuda.is_available():
         device = torch.device("cuda")
     else:
-        torch.manual_seed(42)
-        print("-"*10 + "~TEST~" + "-"*10)
         device = torch.device("cpu")
-        RECORD=False
+        
 
     print(f"Using device: {device.type}")
 
@@ -168,11 +149,7 @@ if __name__ == "__main__":
         x_train_np = np.load(f, allow_pickle=True)
         y_train_np = np.load(f, allow_pickle=True)
         x_val_np = np.load(f, allow_pickle=True)
-        y_val_np = np.load(f, allow_pickle=True)
-        print(x_train_np.dtype)        
-        print(y_train_np.dtype)
-        print(x_val_np.dtype)
-        print(y_val_np.dtype)        
+        y_val_np = np.load(f, allow_pickle=True)    
 
         x_train = torch.from_numpy(x_train_np.astype(np.float32))
         y_train = torch.from_numpy(y_train_np.astype(np.float32))
@@ -181,8 +158,6 @@ if __name__ == "__main__":
         
     train_set = TensorDataset(x_train, y_train)
     val_set = TensorDataset(x_val, y_val)
-    # train_set = TEPSingleSampleDataset(os.path.join(DATASET_FOLDER_PATH, "train_reduced.torch"))
-    # val_set = TEPSingleSampleDataset(os.path.join(DATASET_FOLDER_PATH, "val_reduced.torch"))
 
     NUM_WORKERS = 1
     SHUFFLE = True
@@ -227,7 +202,7 @@ if __name__ == "__main__":
         CHECKPOINT_FOLDER = f"runs/{EXPERIMENT_DATE_TIME}"
 
     if RECORD:
-        writer = SummaryWriter(f'runs_tensorboard/{EXPERIMENT_DATE_TIME}')
+        writer = SummaryWriter(f'runs_tensorboard\{EXPERIMENT_DATE_TIME}')
         os.makedirs(CHECKPOINT_FOLDER, exist_ok=True)
 
     # hyperparameter_search(train_loader, val_loader)
