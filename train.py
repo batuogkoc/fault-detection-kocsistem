@@ -11,7 +11,6 @@ from datetime import datetime
 import os
 from torch.utils.tensorboard import SummaryWriter
 from models import *
-from datasets import *
 from py_utils import *
 
 def train_classifier(model, 
@@ -145,7 +144,7 @@ if __name__ == "__main__":
     print("Loading datasets...")
     DATASET_FOLDER_PATH = "dataset"
 
-    with open("dataset/dataset_pm.npy", "rb") as f:
+    with open("tep/dataset/dataset_pm.npy", "rb") as f:
         x_train_np = np.load(f, allow_pickle=True)
         y_train_np = np.load(f, allow_pickle=True)
         x_val_np = np.load(f, allow_pickle=True)
@@ -158,7 +157,9 @@ if __name__ == "__main__":
         
     train_set = TensorDataset(x_train, y_train)
     val_set = TensorDataset(x_val, y_val)
-
+    print(len(train_set))
+    print(len(val_set))
+    assert len(train_set) > len(val_set), f"Sanity check failed, size of train set ({len(train_set)}) must be greater than size of val set ({len(val_set)})"
     NUM_WORKERS = 1
     SHUFFLE = True
     BATCH_SIZE=16
@@ -168,9 +169,9 @@ if __name__ == "__main__":
     START_EPOCH = 0
     print("Setting up model, optim, etc...")
     # model = MLP([52, 100, 100, 18])
-    # model = LSTM()
-    model = TEPTransformer(input_size=train_set[0][0].shape[-1], num_classes=train_set[0][1].shape[-1],
-                           sequence_length=train_set[0][0].shape[-2], embedding_dim=128, nhead=4, num_layers=4)
+    model = LSTM()
+    # model = TEPTransformer(input_size=train_set[0][0].shape[-1], num_classes=train_set[0][1].shape[-1],
+    #                        sequence_length=train_set[0][0].shape[-2], embedding_dim=128, nhead=4, num_layers=4)
     loss_fn = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
