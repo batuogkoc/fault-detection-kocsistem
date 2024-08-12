@@ -1,10 +1,11 @@
 import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-
+import shutil
 import numpy as np
 
 import torch
 from torch.utils.data import Dataset, DataLoader, TensorDataset
+import torchmetrics
 import torch.nn as nn
 import time
 from datetime import datetime
@@ -13,26 +14,24 @@ from torch.utils.tensorboard import SummaryWriter
 from models import *
 from py_utils import *
 
-def train_classifier(
-                    model:nn.Module, 
-                    optimizer:torch.optim.Optimizer, 
-                    scheduler:torch.optim.lr_scheduler.LRScheduler, 
-                    loss_fn,
-                    epoch_range:range, 
-                    train_loader:DataLoader, 
-                    val_loader:DataLoader,
-                    device:torch.device, 
-                    printing:bool=True,
-                    checkpoint_folder:None|str=None,
-                    tensorboard_writer:None|SummaryWriter=None):
+def train(
+        model:nn.Module, 
+        optimizer:torch.optim.Optimizer, 
+        scheduler:torch.optim.lr_scheduler.LRScheduler, 
+        loss_fn,
+        epoch_range:range, 
+        train_loader:DataLoader, 
+        val_loader:DataLoader,
+        device:torch.device, 
+        printing:bool=True,
+        metrics:dict[str, torchmetrics.Metric]={},
+        checkpoint_folder:None|str=None,
+        tensorboard_writer:None|SummaryWriter=None):
     
     running_average_training_loss_logger = RunningAverageLogger()
-    running_average_training_accuracy_logger = RunningAverageLogger()   
+    val_loss_logger = RunningAverageLogger()
 
-    test_loss_logger = RunningAverageLogger()
-    test_accuracy_logger = RunningAverageLogger()
-
-    printer = InplacePrinter(2)
+    printer = InplacePrinter(2+len(metrics))
     
     model.to(device)
     for epoch in epoch_range:
@@ -42,7 +41,10 @@ def train_classifier(
         start = time.time()
 
         running_average_training_loss_logger.reset()
-        running_average_training_accuracy_logger.reset()
+
+        for metric in metrics.values():
+            metric.reset()
+
         for i, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
 
@@ -51,22 +53,28 @@ def train_classifier(
             y_pred = model(x)
             loss = loss_fn(y_pred, y)
             
+            epoch_metric_values = {}
+            for metric_name, metric in metrics.items():
+                epoch_metric_values[metric_name] = metric(y_pred, y).item()
+
             loss.backward()
             optimizer.step()
             
             running_average_training_loss_logger.add_value(loss.item())
-            running_average_training_accuracy_logger.add_value(float(torch.argmax(y)==torch.argmax(y_pred)))
 
             if i % 10 == 0 and i != 0:
                 fraction_done = max(i/len(train_loader), 1e-6)
                 time_taken = (time.time()-start)
                 if printing:
-                    printer.print(f"e: {epoch} | i: {i} | loss: {loss:2.3f} | ratl: {running_average_training_loss_logger.get_avg():2.3f} | rata: {running_average_training_accuracy_logger.get_avg():.3f}")
+                    for metric_name, metric in metrics.items():
+                        printer.print(f"{metric_name} : {epoch_metric_values[metric_name]}")
+                    printer.print(f"e: {epoch} | i: {i} | loss: {loss.item():2.3f} | ratl: {running_average_training_loss_logger.get_avg():2.3f}")
                     printer.print(f"{fraction_done*100:2.2f}% | est time left: {time_taken*(1-fraction_done)/fraction_done:.1f} s | est total: {time_taken/fraction_done:.1f} s")
                 if tensorboard_writer:
                     tensorboard_writer.add_scalar("running_average_training_loss", running_average_training_loss_logger.get_avg(), epoch*len(train_loader) + i)
-                    tensorboard_writer.add_scalar("running_average_training_accuracy", running_average_training_accuracy_logger.get_avg(), epoch*len(train_loader) + i)
-                
+                    for metric_name, metric in metrics.items():
+                        tensorboard_writer.add_scalar(f"train_{metric_name}", epoch_metric_values[metric_name], epoch*len(train_loader) + i)
+
             if checkpoint_folder and i%10000 == 0 and i!=0:
                 torch.save({
                     "epoch": epoch,
@@ -76,11 +84,19 @@ def train_classifier(
                     "optim_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
                     "running_average_training_loss": running_average_training_loss_logger.get_avg(),
-                    "running_average_training_accuracy": running_average_training_accuracy_logger.get_avg(),
-                }, os.path.join(checkpoint_folder, f"e-{epoch}-i-{i}-mbtl-{loss.item()}-rata-{running_average_training_accuracy_logger.get_avg()}.pt"))
+                    # "running_average_training_accuracy": running_average_training_accuracy_logger.get_avg() if is_classifier else None,
+                    "epoch_metric_values": epoch_metric_values,
+                }, os.path.join(checkpoint_folder, f"e-{epoch}-i-{i}-mbtl-{loss.item()}.pt"))
 
-        test_loss_logger.reset()
-        test_accuracy_logger.reset()
+        if printing:
+            print("--Train--")
+            for metric_name, metric in metrics.items():
+                print(f"{metric_name} : {metric.compute()}")
+                metric.reset()
+
+        val_loss_logger.reset()
+        # if is_classifier:
+        #     test_accuracy_logger.reset()
         with torch.inference_mode():
             for i, (x, y) in enumerate(val_loader):
                 x, y = x.to(device), y.to(device)
@@ -88,20 +104,34 @@ def train_classifier(
                 model.eval()
                 y_pred = model(x)
                 loss = loss_fn(y_pred, y)
-                test_loss_logger.add_value(loss.item())
-                test_accuracy_logger.add_value(int(torch.argmax(y)==torch.argmax(y_pred)))
+                val_loss_logger.add_value(loss.item())
+
+                for metric_name, metric in metrics.items():
+                    metric(y_pred, y)
+                # if is_classifier:
+                #     test_accuracy_logger.add_value(int(torch.argmax(y)==torch.argmax(y_pred)))
+
 
         if printing:
-            print(f"train loss: {running_average_training_loss_logger.get_avg()} | test loss: {test_loss_logger.get_avg()}")
-            print(f"train acc: {running_average_training_accuracy_logger.get_avg()} | test acc: {test_accuracy_logger.get_avg()}")
+            print("--Val--")
+            for metric_name, metric in metrics.items():
+                print(f"{metric_name} : {metric.compute().item()}")
+            print(f"train loss: {running_average_training_loss_logger.get_avg()} | test loss: {val_loss_logger.get_avg()}")
+            # if is_classifier:
+            #     print(f"train acc: {running_average_training_accuracy_logger.get_avg()} | test acc: {test_accuracy_logger.get_avg()}")
+            # else:
+            #     print(metric.compute())
         if scheduler:
             scheduler.step()
 
         if tensorboard_writer:
             tensorboard_writer.add_scalar("train_loss", running_average_training_loss_logger.get_avg(), epoch)
-            tensorboard_writer.add_scalar("test_loss", test_loss_logger.get_avg(), epoch)
-            tensorboard_writer.add_scalar("train_accuracy", running_average_training_accuracy_logger.get_avg(), epoch)
-            tensorboard_writer.add_scalar("test_accuracy", test_accuracy_logger.get_avg(), epoch)
+            tensorboard_writer.add_scalar("test_loss", val_loss_logger.get_avg(), epoch)
+            for metric_name, metric in metrics.items():
+                tensorboard_writer.add_scalar(f"val_{metric_name}", metric.compute().item(), epoch)
+            # if is_classifier:
+            #     tensorboard_writer.add_scalar("train_accuracy", running_average_training_accuracy_logger.get_avg(), epoch)
+            #     tensorboard_writer.add_scalar("test_accuracy", test_accuracy_logger.get_avg(), epoch)
 
         if checkpoint_folder:
             torch.save({
@@ -110,12 +140,14 @@ def train_classifier(
                 "optim_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
                 "training_loss": running_average_training_loss_logger.get_avg(),
-                "test_loss": test_loss_logger.get_avg(),
-                "training_accuracy": running_average_training_accuracy_logger.get_avg(),
-                "test_accuracy" : test_accuracy_logger.get_avg(),
-            }, os.path.join(checkpoint_folder, f"e-{epoch}-train_l-{running_average_training_loss_logger.get_avg()}-test_l-{test_loss_logger.get_avg()}-train_a-{running_average_training_accuracy_logger.get_avg()}-test_a-{test_accuracy_logger.get_avg()}.pt"))
+                "val_loss": val_loss_logger.get_avg(),
+                "metrics": {metric_name:metric.compute().item() for metric_name, metric in metrics.items()},
+                # "training_accuracy": running_average_training_accuracy_logger.get_avg(),
+                # "test_accuracy" : test_accuracy_logger.get_avg(),
+            }, os.path.join(checkpoint_folder, f"e-{epoch}-train_l-{running_average_training_loss_logger.get_avg()}-test_l-{val_loss_logger.get_avg()}.pt"))
     
-    return model, running_average_training_accuracy_logger.get_avg(), test_accuracy_logger.get_avg()
+    # return model, running_average_training_accuracy_logger.get_avg(), test_accuracy_logger.get_avg()
+    return model, metrics
 def hyperparameter_search(train_loader, val_loader):
     params = [[256, 256],
               [256, 128, 128],
@@ -173,15 +205,19 @@ if __name__ == "__main__":
     # model = MLP([52, 100, 100, 18])
     model = LSTM(input_size=train_set[0][0].shape[-1],
                  hidden_size=128,
-                 num_classes=train_set[0][1].shape[-1],
+                 output_size=train_set[0][1].shape[-1],
                  bidirectional_layers_num=1,
                  unidirectional_layers_num=1,
-                 custom_classification_head=None)
+                 is_classifier=False,
+                 custom_head=None)
+    print(model.input_size)
+    print(model.output_size)
     # model = TEPTransformer(input_size=train_set[0][0].shape[-1], num_classes=train_set[0][1].shape[-1],
     #                        sequence_length=train_set[0][0].shape[-2], embedding_dim=128, nhead=4, num_layers=4)
-    loss_fn = nn.CrossEntropyLoss()
+    # loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.MSELoss()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.00003)
     # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 10, 0.3)
     scheduler = None
     
@@ -206,12 +242,33 @@ if __name__ == "__main__":
         print(state.keys())
     else:
         print("Starting fresh run...")
-        EXPERIMENT_DATE_TIME = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        EXPERIMENT_DATE_TIME = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         CHECKPOINT_FOLDER = f"runs/{EXPERIMENT_DATE_TIME}"
 
     if RECORD:
-        writer = SummaryWriter(f'runs_tensorboard\{EXPERIMENT_DATE_TIME}')
+        writer = SummaryWriter(f'runs_tensorboard\\{EXPERIMENT_DATE_TIME}')
         os.makedirs(CHECKPOINT_FOLDER, exist_ok=True)
+    else:
+        # shutil.rmtree(f'runs_tensorboard\\temp')
+        writer = SummaryWriter(os.path.join("runs_tensorboard", str(EXPERIMENT_DATE_TIME)))
+        CHECKPOINT_FOLDER = None
 
-    # hyperparameter_search(train_loader, val_loader)
-    train_classifier(model, optimizer, scheduler, loss_fn, range(START_EPOCH, 200), train_loader, val_loader, logging=RECORD)
+
+    train(
+        model=model, 
+        optimizer=optimizer, 
+        scheduler=scheduler, 
+        loss_fn=loss_fn,
+        epoch_range=range(START_EPOCH, 50), 
+        train_loader=train_loader, 
+        val_loader=val_loader,
+        device=device, 
+        printing=True,
+        # is_classifier=False,
+        metrics={
+            "mae": torchmetrics.MeanAbsoluteError(),
+            "mse": torchmetrics.MeanSquaredError()
+            # "acc" : torchmetrics.Accuracy(task="multiclass", num_classes=model.output_size)
+        },
+        checkpoint_folder=CHECKPOINT_FOLDER,
+        tensorboard_writer=writer)

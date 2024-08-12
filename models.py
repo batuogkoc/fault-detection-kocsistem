@@ -52,17 +52,19 @@ class LSTM(nn.Module):
     def __init__(self, 
                  input_size:int=1,
                  hidden_size:int=128,
-                 num_classes:int=1,
+                 output_size:int=1,
                  bidirectional_layers_num:int=1,
                  unidirectional_layers_num:int=1,
-                 custom_classification_head:nn.Sequential=None):
+                 is_classifier:bool=False,
+                 custom_head:nn.Sequential=None):
         super().__init__()        
         # save hyperparameters
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.num_classes = num_classes
+        self.output_size = output_size
         self.bidirectional_layers_num = bidirectional_layers_num
         self.unidirectional_layers_num = unidirectional_layers_num
+        self.is_classifier = is_classifier
 
         # generate lstm layers
         if bidirectional_layers_num == -1:
@@ -73,19 +75,22 @@ class LSTM(nn.Module):
             self.unidirectional_lstm = nn.LSTM(input_size=2*hidden_size, hidden_size=hidden_size, num_layers=unidirectional_layers_num, batch_first=True)
 
         # if custom classification head isn't specified, use default head
-        if custom_classification_head:
-            self.classification_head = custom_classification_head
+        if custom_head:
+            self.head = custom_head
         else:
-            self.classification_head = nn.Sequential(
+            self.head = nn.Sequential(
                 nn.Linear(hidden_size, 300),
                 nn.SELU(),
                 nn.Dropout(0.5),
-                nn.Linear(300, num_classes),
+                nn.Linear(300, output_size),
             )
-        if num_classes == 1:
-            self.final_activation = nn.Sigmoid()
+        if is_classifier:
+            if output_size == 1:
+                self.final_activation = nn.Sigmoid()
+            else:
+                self.final_activation = nn.Softmax(dim=1)
         else:
-            self.final_activation = nn.Softmax(dim=1)
+            self.final_activation = None
         # for name, param in self.named_parameters():
         #     if 'bias' in name:
         #         nn.init.constant_(param, 0.0)
@@ -96,8 +101,8 @@ class LSTM(nn.Module):
         x, _ = self.bidirectional_lstm(x)
         x, _ = self.unidirectional_lstm(x)
         x = x[:,-1,:]
-        x = self.classification_head(x)
-        return self.final_activation(x)
+        x = self.head(x)
+        return self.final_activation(x) if self.final_activation else x
     
 class TEPTransformer(nn.Module):
     def __init__(self, input_size, num_classes, sequence_length, embedding_dim, nhead, num_layers):
