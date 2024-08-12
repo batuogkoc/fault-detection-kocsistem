@@ -18,7 +18,11 @@ from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 class LSTM(BaseDetector):
-    """LSTM based 1d anomaly detector"""
+    """
+    LSTM based 1d input-1d output anomaly detector
+    Training data consists of different runs, indexed by 'run_idx_column' 
+    with a timestep column of type DateTime indexed by 'timestep_column'
+    """
     def __init__(self,
                  contamination: float = 0.1,
                  anomaly_threshold: Union[float, str] = "auto",
@@ -66,11 +70,13 @@ class LSTM(BaseDetector):
         self.raw_risk_rp = pd.Timedelta(raw_risk_rp) if raw_risk_rp is not None else self.model_rp * 2
         self.risk_rp = pd.Timedelta(risk_rp) if risk_rp is not None else self.model_rp * 6
 
+        #parameters
         self.model_mp: int  
         self.feature_mp: int
         self.raw_risk_mp: int 
         self.range_limit: float
 
+        #NN parameters
         self.model = _LSTM(input_size=1,
                            hidden_size=hidden_size,
                            num_classes=1,
@@ -81,6 +87,8 @@ class LSTM(BaseDetector):
         self.optimizer = optimizer if optimizer else torch.optim.Adam(self.model.parameters(), lr=0.001)
         self.scheduler = scheduler
 
+        self.scaler = StandardScaler()
+
         if device:
             self.device = device
         elif torch.cuda.is_available():
@@ -90,7 +98,7 @@ class LSTM(BaseDetector):
 
         
     def fit(self, data:pd.DataFrame):
-        self.train_set, self.val_set = self.generate_train_val_sets(data)
+        self.train_set, self.val_set = self.generate_train_val_sets(data,self.stride)
 
         train_loader = DataLoader(self.train_set, self.batch_size, shuffle=True)
         val_loader = DataLoader(self.val_set, self.batch_size, shuffle=True)
@@ -111,7 +119,8 @@ class LSTM(BaseDetector):
         return self
         
     def anomaly_score(self, data:pd.DataFrame):
-        x_set = torch.Tensor(data.set_axis(self.timestep_column)[self.feature_column].to_numpy(), device=self.device)
+        #get the x dataset, consisting of a SINGLE RUN and a single feature. Run column is omitted in this case
+        x_set = torch.Tensor(self.scaler.transform(data.set_index(self.timestep_column)[self.feature_column].to_numpy().reshape(-1,1)), device=self.device)
         data["Raw_Anomaly_Score"] = 0
         with torch.inference_mode():
             self.model.eval()
@@ -119,7 +128,7 @@ class LSTM(BaseDetector):
             x_set = x_set.to(self.device)
             for start_idx in range(0, len(x_set)-self.sequence_len):
                 x = x_set[start_idx:start_idx+self.sequence_len]
-                data.loc[start_idx+self.sequence_len-1, "Raw_Anomaly_Score"] = self.model(x)
+                data.loc[start_idx+self.sequence_len, "Raw_Anomaly_Score"] = self.model(x.unsqueeze(0)).item()
         
         # Apply range_filter
         if self.range_filter: data = self._range_filter(data, fit = False)
@@ -127,13 +136,10 @@ class LSTM(BaseDetector):
         # Apply rolling mean to get anomaly scores
         data["Anomaly_Score"] = data['Raw_Anomaly_Score'].rolling(self.model_rp, min_periods=self.model_mp).mean()
 
-        df_anomaly = data["Anomaly_Score"].reset_index()
         return data["Anomaly_Score"].reset_index()
     
 
     def fit_min_periods(self, data: pd.DataFrame):
-        """
-        """
         data = data.set_index(self.timestep_column).sort_index()        
         data['count'] = data.rolling(self.model_rp).count()
         data['count'] = np.where(data['count'] == 0, np.nan, data['count'])
@@ -144,26 +150,30 @@ class LSTM(BaseDetector):
         return self
 
 
-    def generate_x_y_sets(self, data:pd.DataFrame, stride, return_indices=False):
+    def generate_train_val_sets(self, data:pd.DataFrame, stride):
         data = data.dropna()
         x_segments = []
         y_segments = []
 
         for run_idx in data[self.run_idx_column].unique():
+            #get each run
             data_run = data[data[self.run_idx_column] == run_idx].set_index(self.timestep_column)
+
+            #apply sliding window with stride and of length self.sequence_length  
             for start_time in range(0, len(data_run)-self.sequence_len, stride):
-                x_segments.append(data_run.loc[start_time:start_time+self.sequence_len, self.feature_column].to_numpy().astype(np.float32))
-                y_segments.append(data_run.loc[start_time+self.sequence_len, self.y_label_column].to_numpy().astype(np.float32))
+                x_segments.append(data_run.loc[start_time+1:start_time+self.sequence_len, self.feature_column].to_numpy().astype(np.float32))
+                y_segments.append(data_run.loc[start_time+self.sequence_len, self.y_label_column].astype(np.float32))
+
         x_dataset = np.stack(x_segments, axis=0)
         y_dataset = np.stack(y_segments, axis=0)
 
-        self.scaler = StandardScaler()
-        x_scaled = self.scaler.fit_transform(x_dataset.reshape(-1, x_dataset.shape[-1])).reshape(x_dataset.shape)
+        #scale data
+        x_scaled = self.scaler.fit_transform(x_dataset.reshape(-1, 1)).reshape(x_dataset.shape)
 
         x_train, x_val, y_train, y_val = train_test_split(x_scaled, y_dataset, train_size=self.train_fraction)
 
-        train_set = TensorDataset(torch.Tensor(x_train), torch.Tensor(y_train))
-        val_set = TensorDataset(torch.Tensor(x_val), torch.Tensor(y_val))
+        train_set = TensorDataset(torch.Tensor(x_train).unsqueeze(-1), torch.Tensor(y_train).unsqueeze(-1))
+        val_set = TensorDataset(torch.Tensor(x_val).unsqueeze(-1), torch.Tensor(y_val).unsqueeze(-1))
 
         return train_set, val_set
 
@@ -270,6 +280,17 @@ class LSTM(BaseDetector):
                 }, os.path.join(checkpoint_folder, f"e-{epoch}-train_l-{running_average_training_loss_logger.get_avg()}-test_l-{test_loss_logger.get_avg()}-train_a-{running_average_training_accuracy_logger.get_avg()}-test_a-{test_accuracy_logger.get_avg()}.pt"))
         
         return model, running_average_training_accuracy_logger.get_avg(), test_accuracy_logger.get_avg()
+    def _get_params(self):
+        params = {
+            "model_state_dict" : self.model.state_dict(),
+            "scaler_params" : self.scaler.get_params(),
+            "feature_mp": self.feature_mp,
+            "model_mp": self.model_mp,
+            "raw_risk_mp": self.raw_risk_mp,
+            "range_limit": str(pd.to_timedelta(self.range_limit, unit="s")),
+            "anomaly_threshold": self.anomaly_threshold,
+        }
+
 
 class _LSTM(nn.Module):
     def __init__(self, 
@@ -324,5 +345,16 @@ class _LSTM(nn.Module):
         x = self.classification_head(x)
         return self.final_activation(x)
     
+
+    
 if __name__ == "__main__":
-    model_lstm = LSTM()    
+    import pyreadr
+    df = pyreadr.read_r("tep/dataset/RData/TEP_FaultFree_Training.RData")["fault_free_training"]
+    print(df.columns)
+    model_lstm = LSTM(feature_column="xmeas_1",
+                      run_idx_column="simulationRun",
+                      y_label_column="faultNumber",
+                      timestep_column="sample")    
+    model_lstm.generate_train_val_sets(df, 10)
+    # model_lstm.fit(df)
+    model_lstm.anomaly_score(df[df["simulationRun"] ==10])
