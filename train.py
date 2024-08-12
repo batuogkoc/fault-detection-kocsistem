@@ -13,15 +13,18 @@ from torch.utils.tensorboard import SummaryWriter
 from models import *
 from py_utils import *
 
-def train_classifier(model, 
-                     optimizer, 
-                     scheduler, 
-                     loss_fn,
-                     epoch_range, 
-                     train_loader, 
-                     val_loader, 
-                     printing=True,
-                     logging=True):
+def train_classifier(
+                    model:nn.Module, 
+                    optimizer:torch.optim.Optimizer, 
+                    scheduler:torch.optim.lr_scheduler.LRScheduler, 
+                    loss_fn,
+                    epoch_range:range, 
+                    train_loader:DataLoader, 
+                    val_loader:DataLoader,
+                    device:torch.device, 
+                    printing:bool=True,
+                    checkpoint_folder:None|str=None,
+                    tensorboard_writer:None|SummaryWriter=None):
     
     running_average_training_loss_logger = RunningAverageLogger()
     running_average_training_accuracy_logger = RunningAverageLogger()   
@@ -48,7 +51,6 @@ def train_classifier(model,
             y_pred = model(x)
             loss = loss_fn(y_pred, y)
             
-            # optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
@@ -61,11 +63,11 @@ def train_classifier(model,
                 if printing:
                     printer.print(f"e: {epoch} | i: {i} | loss: {loss:2.3f} | ratl: {running_average_training_loss_logger.get_avg():2.3f} | rata: {running_average_training_accuracy_logger.get_avg():.3f}")
                     printer.print(f"{fraction_done*100:2.2f}% | est time left: {time_taken*(1-fraction_done)/fraction_done:.1f} s | est total: {time_taken/fraction_done:.1f} s")
-                if logging:
-                    writer.add_scalar("running_average_training_loss", running_average_training_loss_logger.get_avg(), epoch*len(train_loader) + i)
-                    writer.add_scalar("running_average_training_accuracy", running_average_training_accuracy_logger.get_avg(), epoch*len(train_loader) + i)
+                if tensorboard_writer:
+                    tensorboard_writer.add_scalar("running_average_training_loss", running_average_training_loss_logger.get_avg(), epoch*len(train_loader) + i)
+                    tensorboard_writer.add_scalar("running_average_training_accuracy", running_average_training_accuracy_logger.get_avg(), epoch*len(train_loader) + i)
                 
-            if logging and i%10000 == 0 and i!=0:
+            if checkpoint_folder and i%10000 == 0 and i!=0:
                 torch.save({
                     "epoch": epoch,
                     "epoch_progress": i,
@@ -75,7 +77,7 @@ def train_classifier(model,
                     "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
                     "running_average_training_loss": running_average_training_loss_logger.get_avg(),
                     "running_average_training_accuracy": running_average_training_accuracy_logger.get_avg(),
-                }, os.path.join(CHECKPOINT_FOLDER, f"e-{epoch}-i-{i}-mbtl-{loss.item()}-rata-{running_average_training_accuracy_logger.get_avg()}.pt"))
+                }, os.path.join(checkpoint_folder, f"e-{epoch}-i-{i}-mbtl-{loss.item()}-rata-{running_average_training_accuracy_logger.get_avg()}.pt"))
 
         test_loss_logger.reset()
         test_accuracy_logger.reset()
@@ -95,12 +97,13 @@ def train_classifier(model,
         if scheduler:
             scheduler.step()
 
-        if logging:
-            writer.add_scalar("train_loss", running_average_training_loss_logger.get_avg(), epoch)
-            writer.add_scalar("test_loss", test_loss_logger.get_avg(), epoch)
-            writer.add_scalar("train_accuracy", running_average_training_accuracy_logger.get_avg(), epoch)
-            writer.add_scalar("test_accuracy", test_accuracy_logger.get_avg(), epoch)
-            
+        if tensorboard_writer:
+            tensorboard_writer.add_scalar("train_loss", running_average_training_loss_logger.get_avg(), epoch)
+            tensorboard_writer.add_scalar("test_loss", test_loss_logger.get_avg(), epoch)
+            tensorboard_writer.add_scalar("train_accuracy", running_average_training_accuracy_logger.get_avg(), epoch)
+            tensorboard_writer.add_scalar("test_accuracy", test_accuracy_logger.get_avg(), epoch)
+
+        if checkpoint_folder:
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -110,10 +113,9 @@ def train_classifier(model,
                 "test_loss": test_loss_logger.get_avg(),
                 "training_accuracy": running_average_training_accuracy_logger.get_avg(),
                 "test_accuracy" : test_accuracy_logger.get_avg(),
-            }, os.path.join(CHECKPOINT_FOLDER, f"e-{epoch}-train_l-{running_average_training_loss_logger.get_avg()}-test_l-{test_loss_logger.get_avg()}-train_a-{running_average_training_accuracy_logger.get_avg()}-test_a-{test_accuracy_logger.get_avg()}.pt"))
+            }, os.path.join(checkpoint_folder, f"e-{epoch}-train_l-{running_average_training_loss_logger.get_avg()}-test_l-{test_loss_logger.get_avg()}-train_a-{running_average_training_accuracy_logger.get_avg()}-test_a-{test_accuracy_logger.get_avg()}.pt"))
     
     return model, running_average_training_accuracy_logger.get_avg(), test_accuracy_logger.get_avg()
-
 def hyperparameter_search(train_loader, val_loader):
     params = [[256, 256],
               [256, 128, 128],
@@ -144,7 +146,7 @@ if __name__ == "__main__":
     print("Loading datasets...")
     DATASET_FOLDER_PATH = "dataset"
 
-    with open("tep/dataset/dataset_pm.npy", "rb") as f:
+    with open("nasa/dataset/dataset_pm_nasa.npy", "rb") as f:
         x_train_np = np.load(f, allow_pickle=True)
         y_train_np = np.load(f, allow_pickle=True)
         x_val_np = np.load(f, allow_pickle=True)
@@ -169,7 +171,12 @@ if __name__ == "__main__":
     START_EPOCH = 0
     print("Setting up model, optim, etc...")
     # model = MLP([52, 100, 100, 18])
-    model = LSTM()
+    model = LSTM(input_size=train_set[0][0].shape[-1],
+                 hidden_size=128,
+                 num_classes=train_set[0][1].shape[-1],
+                 bidirectional_layers_num=1,
+                 unidirectional_layers_num=1,
+                 custom_classification_head=None)
     # model = TEPTransformer(input_size=train_set[0][0].shape[-1], num_classes=train_set[0][1].shape[-1],
     #                        sequence_length=train_set[0][0].shape[-2], embedding_dim=128, nhead=4, num_layers=4)
     loss_fn = nn.CrossEntropyLoss()

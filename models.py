@@ -49,15 +49,43 @@ class MLP(nn.Module):
 
 
 class LSTM(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.lstm_1 = nn.LSTM(input_size=52, hidden_size=128, batch_first=True, bidirectional=True)
-        self.lstm_2 = nn.LSTM(input_size=256, hidden_size=128, batch_first=True)
-        self.linear_1 = nn.Linear(128, 300)
-        self.dropout = nn.Dropout(0.5)
-        self.linear_2 = nn.Linear(300, 18)
-        self.selu = nn.SELU()
-        self.softmax = nn.Softmax(dim=1)
+    def __init__(self, 
+                 input_size:int=1,
+                 hidden_size:int=128,
+                 num_classes:int=1,
+                 bidirectional_layers_num:int=1,
+                 unidirectional_layers_num:int=1,
+                 custom_classification_head:nn.Sequential=None):
+        super().__init__()        
+        # save hyperparameters
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_classes = num_classes
+        self.bidirectional_layers_num = bidirectional_layers_num
+        self.unidirectional_layers_num = unidirectional_layers_num
+
+        # generate lstm layers
+        if bidirectional_layers_num == -1:
+            self.bidirectional_lstm = None
+            self.unidirectional_lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=unidirectional_layers_num, batch_first=True)
+        else:
+            self.bidirectional_lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=bidirectional_layers_num, batch_first=True, bidirectional=True)
+            self.unidirectional_lstm = nn.LSTM(input_size=2*hidden_size, hidden_size=hidden_size, num_layers=unidirectional_layers_num, batch_first=True)
+
+        # if custom classification head isn't specified, use default head
+        if custom_classification_head:
+            self.classification_head = custom_classification_head
+        else:
+            self.classification_head = nn.Sequential(
+                nn.Linear(hidden_size, 300),
+                nn.SELU(),
+                nn.Dropout(0.5),
+                nn.Linear(300, num_classes),
+            )
+        if num_classes == 1:
+            self.final_activation = nn.Sigmoid()
+        else:
+            self.final_activation = nn.Softmax(dim=1)
         # for name, param in self.named_parameters():
         #     if 'bias' in name:
         #         nn.init.constant_(param, 0.0)
@@ -65,16 +93,11 @@ class LSTM(nn.Module):
         #         nn.init.xavier_uniform_(param)
 
     def forward(self, x):
-        x, _ = self.lstm_1(x)
-        # x = F.tanh(x)
-        x, _ = self.lstm_2(x)
-        # x = F.tanh(x)
+        x, _ = self.bidirectional_lstm(x)
+        x, _ = self.unidirectional_lstm(x)
         x = x[:,-1,:]
-        x = self.linear_1(x)
-        x = self.selu(x)
-        x = self.dropout(x)
-        x = self.linear_2(x)
-        return self.softmax(x)
+        x = self.classification_head(x)
+        return self.final_activation(x)
     
 class TEPTransformer(nn.Module):
     def __init__(self, input_size, num_classes, sequence_length, embedding_dim, nhead, num_layers):
