@@ -34,6 +34,10 @@ def train(
     printer = InplacePrinter(2+len(metrics))
     
     model.to(device)
+
+    for metric in metrics.values():
+        metric.to(device)
+    
     for epoch in epoch_range:
         if printing:
             printer.reset()
@@ -49,7 +53,6 @@ def train(
             x, y = x.to(device), y.to(device)
 
             model.train()
-
             y_pred = model(x)
             loss = loss_fn(y_pred, y)
             
@@ -188,9 +191,12 @@ if __name__ == "__main__":
         y_train = torch.from_numpy(y_train_np.astype(np.float32))
         x_val = torch.from_numpy(x_val_np.astype(np.float32))
         y_val = torch.from_numpy(y_val_np.astype(np.float32))
-        
+    
     train_set = TensorDataset(x_train, y_train)
     val_set = TensorDataset(x_val, y_val)
+    # scaling_factor = 64
+    # train_set = TensorDataset(x_train[:len(x_train)//scaling_factor], y_train[:len(x_train)//scaling_factor])
+    # val_set = TensorDataset(x_val[:len(x_val)//scaling_factor], y_val[:len(x_val)//scaling_factor])
     print(len(train_set))
     print(len(val_set))
     assert len(train_set) > len(val_set), f"Sanity check failed, size of train set ({len(train_set)}) must be greater than size of val set ({len(val_set)})"
@@ -202,23 +208,34 @@ if __name__ == "__main__":
 
     START_EPOCH = 0
     print("Setting up model, optim, etc...")
-    # model = MLP([52, 100, 100, 18])
+    model = MLP([train_set[0][0].shape[-1], 100, 100, train_set[0][1].shape[-1]])
     model = LSTM(input_size=train_set[0][0].shape[-1],
-                 hidden_size=128,
+                 hidden_size=256,
                  output_size=train_set[0][1].shape[-1],
                  bidirectional_layers_num=1,
                  unidirectional_layers_num=1,
                  is_classifier=False,
-                 custom_head=None)
-    print(model.input_size)
-    print(model.output_size)
+                 custom_head=nn.Sequential( 
+                nn.Linear(256, 512),
+                nn.SELU(),
+                nn.Dropout(0.5),
+                nn.Linear(512, 1)))
+    # model = LSTM(input_size=train_set[0][0].shape[-1],
+    #              hidden_size=128,
+    #              output_size=train_set[0][1].shape[-1],
+    #              bidirectional_layers_num=1,
+    #              unidirectional_layers_num=1,
+    #              is_classifier=True,
+    #              custom_head=None)
+
     # model = TEPTransformer(input_size=train_set[0][0].shape[-1], num_classes=train_set[0][1].shape[-1],
     #                        sequence_length=train_set[0][0].shape[-2], embedding_dim=128, nhead=4, num_layers=4)
     # loss_fn = nn.CrossEntropyLoss()
     loss_fn = nn.MSELoss()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.00003)
-    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 10, 0.3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.000003)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 30, 0.3)
     scheduler = None
     
     # LOAD_PROGRESS_PATH = "runs/2024-06-20T15:23:33/e-8-train_l-813.9820446734548-test_loss-869.9771018757278.pt"
@@ -268,7 +285,7 @@ if __name__ == "__main__":
         metrics={
             "mae": torchmetrics.MeanAbsoluteError(),
             "mse": torchmetrics.MeanSquaredError()
-            # "acc" : torchmetrics.Accuracy(task="multiclass", num_classes=model.output_size)
+            # "acc" : torchmetrics.Accuracy(task="multiclass", num_classes=18)
         },
         checkpoint_folder=CHECKPOINT_FOLDER,
         tensorboard_writer=writer)
